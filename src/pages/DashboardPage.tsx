@@ -791,7 +791,7 @@ export function DashboardPage() {
   };
 
   /** Refresca el panel desde la BD y, si hay token, encola GYG+Viator en el servidor con barra de progreso. */
-  const handleSincronizarPanel = async () => {
+  const handleActualizarPanel = async () => {
     if (panelSyncBusy) return;
     if (scrapePollRef.current) {
       clearInterval(scrapePollRef.current);
@@ -963,7 +963,7 @@ export function DashboardPage() {
             <div className="flex min-w-[240px] max-w-md flex-col gap-2">
               <button
                 type="button"
-                onClick={() => void handleSincronizarPanel()}
+                onClick={() => void handleActualizarPanel()}
                 disabled={panelSyncBusy}
                 title={
                   scrapingToken
@@ -972,8 +972,16 @@ export function DashboardPage() {
                 }
                 className="rounded-lg bg-gradient-to-r from-amber-500 via-orange-500 to-rose-600 px-5 py-2.5 text-base font-bold text-white shadow-lg shadow-orange-500/45 ring-2 ring-amber-200/90 transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-55 disabled:shadow-none"
               >
-                {panelSyncBusy ? "⏳ Sincronizando…" : "⚡ Sincronizar datos"}
+                {panelSyncBusy ? "⏳ Actualizando…" : "⚡ Actualizar datos"}
               </button>
+              <p className="text-xs font-semibold text-slate-800">
+                Última captura de precios:{" "}
+                <span className="font-normal text-slate-600">
+                  {isPricesLoading && !latestPrices?.observed_at
+                    ? "…"
+                    : formatUtcToLocal(latestPrices?.observed_at ?? null)}
+                </span>
+              </p>
               {scrapingToken && (panelSyncBusy || scrapePercent > 0 || scrapeError) ? (
                 <>
                   <div

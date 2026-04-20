@@ -29,7 +29,7 @@ import { toursQueryKeys } from "@/features/tours/queryKeys";
 import { useTourSelection } from "@/features/tours/TourSelectionContext";
 import { useToursQuery } from "@/features/tours/useToursQuery";
 import type { PricePointResponse } from "@/types/market";
-import { formatUtcToLocal } from "@/utils/datetime";
+import { formatUtcToLocal, utcIsoToLocalDateKey } from "@/utils/datetime";
 import { formatCurrency, parseDecimalToNumber } from "@/utils/number";
 
 type PriceLevel = "low" | "medium" | "high" | "none";
@@ -117,6 +117,13 @@ function formatIsoDateShortEs(iso: string): string {
 function formatHorizonRangeLabel(fromIso: string, toIso: string): string {
   return `${formatIsoDateShortEs(fromIso)} – ${formatIsoDateShortEs(toIso)}`;
 }
+
+type TrendChartRow = {
+  date: string;
+  label: string;
+  getyourguide: number | null;
+  viator: number | null;
+};
 
 const HEATMAP_GRADIENT =
   "linear-gradient(to right, #22c55e 0%, #22c55e 34%, #fbbf24 34%, #fbbf24 67%, #ef4444 67%, #ef4444 100%)";
@@ -462,8 +469,8 @@ export function DashboardPage() {
   }, [selectedTourCode, priceCalendarMonthKey]);
 
   /**
-   * Tendencia mensual: un punto por día del mes (Año/Mes), independiente del horizonte y del filtro de OTAs.
-   * Media entre plataformas y franja min–max (fluctuación) por día según la serie histórica scrapeada.
+   * Tendencia mensual: **solo** precio medio real por día del mes (sin rellenar huecos).
+   * GYG: media de todas las filas con esa fecha de visita. Viator (listado): media del scrape cuyo día local (observed_at) coincide.
    */
   const trendChartData = useMemo(() => {
     const { from: rangeFrom, to: rangeTo } = firstLastOfMonthKey(priceCalendarMonthKey);
@@ -476,7 +483,10 @@ export function DashboardPage() {
       if (otaKey !== "getyourguide" && otaKey !== "viator") continue;
       const value = getPriceValue(item);
       if (value === null) continue;
-      const day = item.target_date;
+      const day =
+        otaKey === "viator" && item.horizon_days === 0
+          ? utcIsoToLocalDateKey(item.observed_at) ?? item.target_date
+          : item.target_date;
       if (day < rangeFrom || day > rangeTo) continue;
       const otaMap = byDateTs.get(day) ?? {};
       const arr = otaMap[otaKey] ?? [];
@@ -497,12 +507,7 @@ export function DashboardPage() {
 
     const start = new Date(sy, sm - 1, sd);
     const end = new Date(ey, em - 1, ed);
-    const rows: Array<{
-      date: string;
-      label: string;
-      getyourguide: number | null;
-      viator: number | null;
-    }> = [];
+    const rows: TrendChartRow[] = [];
     const cursor = new Date(start);
 
     const avgForKey = (m: Record<string, number[]>, key: string): number | null => {
@@ -1124,12 +1129,15 @@ export function DashboardPage() {
           <header className="border-b border-slate-200 px-4 py-2 text-xl font-semibold text-slate-800">Tendencia de precios</header>
           <div className="p-4">
             <p className="mb-2 text-xs text-slate-600">
-              <span className="font-medium text-slate-800">Todo el mes</span> de Año/Mes (un punto por día y por plataforma).
-              Dos líneas: <span className="font-medium text-slate-800">GetYourGuide</span> y{" "}
-              <span className="font-medium text-slate-800">Viator</span>. No usa horizonte ni checkboxes de OTAs.
+              Cada punto es el <span className="font-medium text-slate-800">precio medio de ese día</span> (media aritmética de los precios scrapeados para esa fecha).
+              <span className="font-medium text-slate-800"> GetYourGuide</span>: día ={" "}
+              <span className="font-medium text-slate-800">fecha de visita</span>.{" "}
+              <span className="font-medium text-slate-800">Viator</span>: día ={" "}
+              <span className="font-medium text-slate-800">día del scrape</span> (media de las tarjetas del listado).
+              Sin scrape ese día → sin punto (hueco en la línea). No usa horizonte ni checkboxes de OTAs.
             </p>
             <p className="mb-3 text-[11px] leading-snug text-slate-500">
-              Hueco = sin dato scrapeado ese día para esa OTA (en Viator suele haber menos fechas de visita con precio).
+              El eje X muestra todos los días del mes seleccionado; solo hay valor donde hay datos en base.
             </p>
             {isTrendTimeseriesLoading ? <div className="h-[320px] animate-pulse rounded bg-slate-100" /> : null}
             {!isTrendTimeseriesLoading && isTrendTimeseriesError ? (
@@ -1181,8 +1189,8 @@ export function DashboardPage() {
                         return row?.date ?? "";
                       }}
                       formatter={(value, name) => {
-                        if (typeof value !== "number") return ["—", name];
-                        return [formatCurrency(value, primaryCurrency), name];
+                        if (typeof value !== "number") return ["Sin dato ese día", name];
+                        return [`${formatCurrency(value, primaryCurrency)} · media del día`, name];
                       }}
                     />
                     <Legend wrapperStyle={{ paddingTop: 6, fontSize: 12 }} iconType="line" />

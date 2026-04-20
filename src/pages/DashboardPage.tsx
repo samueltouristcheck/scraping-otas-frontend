@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   CartesianGrid,
@@ -12,7 +12,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { postScrapingTrigger } from "@/api/scraping";
+import { getScrapingStatus, postScrapingTrigger } from "@/api/scraping";
 import { HORIZON_OPTIONS, KNOWN_OTA_NAMES, otaColor, otaLabel } from "@/features/dashboard/constants";
 import { useHorizonSelection } from "@/features/dashboard/HorizonSelectionContext";
 import {
@@ -237,7 +237,22 @@ export function DashboardPage() {
   const queryClient = useQueryClient();
   const { selectedTourCode, setSelectedTourCode } = useTourSelection();
   const { selectedHorizon, setSelectedHorizon } = useHorizonSelection();
-  const [revisarBusy, setRevisarBusy] = useState(false);
+  const scrapingToken = (import.meta.env.VITE_SCRAPING_TRIGGER_TOKEN as string | undefined)?.trim() ?? "";
+  const [panelSyncBusy, setPanelSyncBusy] = useState(false);
+  const [scrapePercent, setScrapePercent] = useState(0);
+  const [scrapePhase, setScrapePhase] = useState("");
+  const [scrapeDetail, setScrapeDetail] = useState("");
+  const [scrapeError, setScrapeError] = useState<string | null>(null);
+  const scrapePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (scrapePollRef.current) {
+        clearInterval(scrapePollRef.current);
+        scrapePollRef.current = null;
+      }
+    };
+  }, []);
 
   const { data: tours, isLoading: isToursLoading, isError: isToursError, refetch: refetchTours } = useToursQuery();
   const { data: sources } = useSourcesQuery(selectedTourCode);
@@ -763,30 +778,96 @@ export function DashboardPage() {
     }));
   }, [filteredLatestPrices]);
 
-  const handleRevisarTodo = async () => {
-    if (revisarBusy) return;
-    setRevisarBusy(true);
-    try {
-      await queryClient.invalidateQueries({ queryKey: toursQueryKeys.all });
-      await queryClient.invalidateQueries({ queryKey: ["sources"] });
-      await queryClient.invalidateQueries({ queryKey: ["latest-prices"] });
-      await queryClient.invalidateQueries({ queryKey: ["latest-availability"] });
-      await queryClient.invalidateQueries({ queryKey: ["price-timeseries"] });
-      await queryClient.invalidateQueries({ queryKey: ["price-timeseries-trend"] });
-      await queryClient.invalidateQueries({ queryKey: ["viator-listing"] });
-      await queryClient.invalidateQueries({ queryKey: ["availability-heatmap"] });
-      await queryClient.invalidateQueries({ queryKey: ["availability-day-detail"] });
+  const invalidateDashboardQueries = async () => {
+    await queryClient.invalidateQueries({ queryKey: toursQueryKeys.all });
+    await queryClient.invalidateQueries({ queryKey: ["sources"] });
+    await queryClient.invalidateQueries({ queryKey: ["latest-prices"] });
+    await queryClient.invalidateQueries({ queryKey: ["latest-availability"] });
+    await queryClient.invalidateQueries({ queryKey: ["price-timeseries"] });
+    await queryClient.invalidateQueries({ queryKey: ["price-timeseries-trend"] });
+    await queryClient.invalidateQueries({ queryKey: ["viator-listing"] });
+    await queryClient.invalidateQueries({ queryKey: ["availability-heatmap"] });
+    await queryClient.invalidateQueries({ queryKey: ["availability-day-detail"] });
+  };
 
-      const token = (import.meta.env.VITE_SCRAPING_TRIGGER_TOKEN as string | undefined)?.trim();
-      if (token) {
-        try {
-          await postScrapingTrigger(token);
-        } catch {
-          /* El refresco desde BD ya se disparó; el scrape en servidor es opcional. */
+  /** Refresca el panel desde la BD y, si hay token, encola GYG+Viator en el servidor con barra de progreso. */
+  const handleSincronizarPanel = async () => {
+    if (panelSyncBusy) return;
+    if (scrapePollRef.current) {
+      clearInterval(scrapePollRef.current);
+      scrapePollRef.current = null;
+    }
+    setPanelSyncBusy(true);
+    setScrapeError(null);
+    setScrapePercent(0);
+    setScrapePhase("");
+    setScrapeDetail(scrapingToken ? "Actualizando desde el servidor…" : "Actualizando desde el servidor…");
+
+    try {
+      await invalidateDashboardQueries();
+    } catch {
+      setPanelSyncBusy(false);
+      setScrapeDetail("");
+      return;
+    }
+
+    if (!scrapingToken) {
+      setPanelSyncBusy(false);
+      setScrapeDetail("");
+      return;
+    }
+
+    setScrapeDetail("Encolando scrape (GYG + Viator)…");
+
+    const pollOnce = async (): Promise<"done" | "error" | "running"> => {
+      try {
+        const s = await getScrapingStatus(scrapingToken);
+        setScrapePercent(s.percent);
+        setScrapePhase(s.phase);
+        setScrapeDetail(s.detail);
+        if (s.status === "done") {
+          if (scrapePollRef.current) {
+            clearInterval(scrapePollRef.current);
+            scrapePollRef.current = null;
+          }
+          setPanelSyncBusy(false);
+          await invalidateDashboardQueries();
+          return "done";
         }
+        if (s.status === "error") {
+          if (scrapePollRef.current) {
+            clearInterval(scrapePollRef.current);
+            scrapePollRef.current = null;
+          }
+          setPanelSyncBusy(false);
+          setScrapeError(s.error ?? s.detail ?? "Error en el scrape");
+          return "error";
+        }
+        return "running";
+      } catch {
+        return "running";
       }
-    } finally {
-      setRevisarBusy(false);
+    };
+
+    try {
+      await postScrapingTrigger(scrapingToken);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("409")) {
+        setScrapeError("Ya hay un scrape en curso en el servidor.");
+      } else {
+        setScrapeError(msg);
+      }
+      setPanelSyncBusy(false);
+      setScrapeDetail("");
+      return;
+    }
+
+    const first = await pollOnce();
+    if (first === "running") {
+      scrapePollRef.current = setInterval(() => {
+        void pollOnce();
+      }, 1000);
     }
   };
 
@@ -879,18 +960,42 @@ export function DashboardPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-[240px] max-w-md flex-col gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  void handleRevisarTodo();
-                }}
-                disabled={revisarBusy}
-                title="Vuelve a cargar tours, precios, disponibilidad y series desde el servidor. Si en el .env del frontend está VITE_SCRAPING_TRIGGER_TOKEN (mismo valor que SCRAPING_TRIGGER_SECRET en el backend), también encola un ciclo de scraping GetYourGuide + Viator en segundo plano."
-                className="rounded border border-slate-400 bg-white px-3 py-1.5 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => void handleSincronizarPanel()}
+                disabled={panelSyncBusy}
+                title={
+                  scrapingToken
+                    ? "Actualiza tours, precios y disponibilidad desde la base de datos y encola un scrape GetYourGuide + Viator en el servidor (progreso en la barra)."
+                    : "Actualiza el panel desde la base de datos. Para también disparar el scrape en el servidor, define VITE_SCRAPING_TRIGGER_TOKEN igual que SCRAPING_TRIGGER_SECRET en el backend."
+                }
+                className="rounded-lg bg-gradient-to-r from-amber-500 via-orange-500 to-rose-600 px-5 py-2.5 text-base font-bold text-white shadow-lg shadow-orange-500/45 ring-2 ring-amber-200/90 transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-55 disabled:shadow-none"
               >
-                {revisarBusy ? "Revisando…" : "Revisar todo"}
+                {panelSyncBusy ? "⏳ Sincronizando…" : "⚡ Sincronizar datos"}
               </button>
+              {scrapingToken && (panelSyncBusy || scrapePercent > 0 || scrapeError) ? (
+                <>
+                  <div
+                    className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200"
+                    role="progressbar"
+                    aria-valuenow={scrapePercent}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                  >
+                    <div
+                      className="h-2.5 rounded-full bg-gradient-to-r from-amber-400 to-rose-500 transition-[width] duration-300"
+                      style={{ width: `${Math.min(100, Math.max(0, scrapePercent))}%` }}
+                    />
+                  </div>
+                  <p className="text-xs leading-snug text-slate-600">
+                    {scrapePercent}%
+                    {scrapePhase ? ` · ${scrapePhase}` : ""}
+                    {scrapeDetail ? ` · ${scrapeDetail}` : ""}
+                    {scrapeError ? <span className="block text-red-700">{scrapeError}</span> : null}
+                  </p>
+                </>
+              ) : null}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">

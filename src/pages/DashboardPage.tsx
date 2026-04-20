@@ -297,6 +297,7 @@ export function DashboardPage() {
     isError: isPricesError,
     refetch: refetchPrices,
   } = useLatestPricesQuery(selectedTourCode, selectedHorizon, rangeDaysForSnapshots, singleSelectedOta);
+  const latestPricesObservedAt = latestPrices?.observed_at ?? null;
   const {
     data: latestAvailability,
     isLoading: isAvailabilityLoading,
@@ -977,9 +978,7 @@ export function DashboardPage() {
               <p className="text-xs font-semibold text-slate-800">
                 Última captura de precios:{" "}
                 <span className="font-normal text-slate-600">
-                  {isPricesLoading && !latestPrices?.observed_at
-                    ? "…"
-                    : formatUtcToLocal(latestPrices?.observed_at ?? null)}
+                  {isPricesLoading && !latestPricesObservedAt ? "…" : formatUtcToLocal(latestPricesObservedAt)}
                 </span>
               </p>
               {scrapingToken && (panelSyncBusy || scrapePercent > 0 || scrapeError) ? (
